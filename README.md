@@ -1,8 +1,31 @@
-# AIEA — AI Efficiency Auditor for Claude Code
+# AIEA - AI Efficiency Auditor for Claude Code
 
-Claude Code 的 Token 浪费诊断工具。不是告诉你"花了多少 token"，而是告诉你**为什么花这么多、浪费在哪、怎么降下来**。
+AIEA audits local Claude Code session JSONL logs and explains where token waste comes from: repeated reads, toxic files, bloated shell output, failed-command loops, and large edit/write calls.
 
-## 安装
+It is not a token dashboard. The goal is to answer three questions:
+
+- Why did this session spend so much context?
+- Where did the waste happen?
+- What project rules should prevent it next time?
+
+## Version
+
+Current version: `0.3.0`
+
+## What's New in 0.3.0
+
+- Added the learner module for historical waste-pattern analysis.
+- Preserved actionable metadata such as full file paths and real bash command text.
+- Improved `.contextignore` suggestions so directory poisons like `node_modules/` do not become unsafe basename-only ignores such as `index.js`.
+- Grouped bloated command findings by real command text instead of command-length buckets.
+
+## What's New in 0.2.0
+
+- Switched the audit source to Claude Code local session JSONL under `~/.claude/projects`.
+- Extracted `tool_use` and `tool_result` entries from message content.
+- Added forensic-style audit data for file paths, command text, result sizes, and estimated command duration.
+
+## Install
 
 ```bash
 git clone https://github.com/jes614753-sketch/aiea.git
@@ -10,47 +33,60 @@ cd aiea
 pip install -e .
 ```
 
-零依赖，纯标准库。
+AIEA uses the Python standard library only.
 
-## 使用
+## Usage
 
 ```bash
-# 扫描默认 telemetry 目录
+# Scan local Claude Code session JSONL logs
 python -m aiea scan
 
-# 指定目录
-python -m aiea scan --dir ~/.claude/telemetry
-
-# 只查某个 session
+# Filter by session id prefix
 python -m aiea scan --session <session_id_prefix>
 
-# 输出 Markdown 报告
+# Output a Markdown report
 python -m aiea scan --output report.md
+
+# Output JSON for automation
+python -m aiea scan --json
+
+# Learn recurring waste patterns from historical sessions
+python -m aiea learn
+
+# Write learning artifacts such as context-ignore suggestions
+python -m aiea learn --output-dir .
 ```
 
-## 检测的浪费模式
+## Detected Waste Patterns
 
-| 嗅探器 | 检测内容 | 严重等级 |
-|--------|---------|---------|
-| `toxic_file` | lockfile、编译产物、二进制文件被读入上下文 | high/medium |
-| `bloated_context` | Bash 命令输出过大 (>5KB/20KB/100KB) | critical/high/medium |
-| `death_loop` | 连续失败的相似命令重试 | high/medium |
+| Sniffer | Detects | Severity |
+| --- | --- | --- |
+| `toxic_file` | Dependency folders, build artifacts, lockfiles, media/binary files read into context | high / medium |
+| `bloated_context` | Shell commands with very large output | critical / high / medium |
+| `death_loop` | Repeated failed or timed-out similar commands | high / medium |
 
-## 工作原理
+## How It Works
 
-读取 `~/.claude/telemetry/` 下的 JSONL 事件日志，解码 base64 元数据，构建 session 时间线，然后运行嗅探器检测浪费模式。
-
-```
-telemetry JSONL → 解码 → SessionTimeline → Sniffers → WasteFinding → Report
+```text
+Claude Code JSONL -> ingestion -> SessionTimeline -> sniffers -> findings -> report / learner
 ```
 
-## 数据来源
+The ingestion layer reads local JSONL session files, extracts tool calls and tool results, then builds session timelines for the sniffers.
 
-Claude Code 的 telemetry 事件（存储在 `~/.claude/telemetry/1p_failed_events.*.json`），包含：
-- `tengu_api_success` — API 调用详情（tokens、成本、模型）
-- `tengu_tool_use_success` — 工具调用详情（大小、耗时）
-- `tengu_context_size` — 上下文大小快照
-- `tengu_file_read_reread` — 文件重复读取事件
+The learner aggregates historical findings and can suggest project-level prevention rules, especially for `.contextignore` and `CLAUDE.md`.
+
+## Relationship to cc-token-governor
+
+AIEA is the audit side of the workflow. It finds waste after a session has happened.
+
+`cc-token-governor` is the runtime side. It turns audit findings and learned corrections into Claude Code hook policies that warn, block, or inject learned project guidance before the next wasteful action.
+
+Recommended workflow:
+
+1. Run Claude Code normally.
+2. Use AIEA to audit local JSONL session logs.
+3. Convert findings into `.contextignore`, `CLAUDE.md`, and policy suggestions.
+4. Use `cc-token-governor` to enforce the recurring lessons at runtime.
 
 ## License
 
