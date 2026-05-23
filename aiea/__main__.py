@@ -104,6 +104,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_learn(args: argparse.Namespace) -> int:
+    from aiea.learner import run_learning, print_learning_summary, write_learning_artifacts
+
+    report = run_learning(min_sessions=args.min_sessions)
+    print_learning_summary(report)
+
+    if args.output_dir:
+        write_learning_artifacts(report, args.output_dir)
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="AIEA — AI Efficiency Auditor",
@@ -113,6 +125,8 @@ def main() -> int:
             "  python -m aiea scan                        # 扫描所有 session\n"
             "  python -m aiea scan --session abc123       # 只分析特定 session\n"
             "  python -m aiea scan --output report.md     # 生成 Markdown 报告\n"
+            "  python -m aiea learn                       # 历史学习分析\n"
+            "  python -m aiea learn --output-dir ./       # 生成建议草案文件\n"
         ),
     )
 
@@ -131,9 +145,21 @@ def main() -> int:
         help="以 JSON 格式输出结果",
     )
 
+    learn_parser = sub.add_parser("learn", help="从历史 session 学习浪费模式，生成建议草案")
+    learn_parser.add_argument(
+        "--min-sessions", type=int, default=3,
+        help="最少跨 session 数 (默认: 3)",
+    )
+    learn_parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="输出建议文件的目录 (不指定则只打印摘要)",
+    )
+
     args = parser.parse_args()
     if args.command == "scan":
         return cmd_scan(args)
+    elif args.command == "learn":
+        return cmd_learn(args)
     return 0
 
 
