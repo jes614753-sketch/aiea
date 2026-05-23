@@ -6,33 +6,33 @@ from ..models import SessionTimeline, WasteFinding, ToolUseSuccessEvent
 from . import register, Sniffer
 
 
-# 毒药文件模式： (扩展名模式, 匹配函数, 描述)
+# 毒药文件模式： (模式, 匹配目标, 严重等级, 匹配方式)
+# 匹配方式: "ext"=仅扩展名, "file"=匹配完整文件名, "path"=匹配路径片段
 TOXIC_PATTERNS = [
-    # lockfile
-    (r"^(lock|lockb)$", "lockfile", "high"),
-    (r"^package-lock\.json$", "lockfile", "high"),
-    (r"^yarn\.lock$", "lockfile", "high"),
-    (r"^pnpm-lock\.yaml$", "lockfile", "high"),
-    (r"^composer\.lock$", "lockfile", "high"),
-    (r"^Cargo\.lock$", "lockfile", "high"),
-    (r"^Gemfile\.lock$", "lockfile", "high"),
+    # lockfile (扩展名匹配)
+    (r"^(lock|lockb)$", "lockfile", "high", "ext"),
+    (r"^yarn\.lock$", "lockfile", "high", "file"),
+    (r"^pnpm-lock\.yaml$", "lockfile", "high", "file"),
+    (r"^composer\.lock$", "lockfile", "high", "file"),
+    (r"^Cargo\.lock$", "lockfile", "high", "file"),
+    (r"^Gemfile\.lock$", "lockfile", "high", "file"),
     # 编译产物
-    (r"^min\.(js|css)$", "编译产物", "high"),
-    (r"^(bundle|chunk)\..*\.(js|css)$", "编译产物", "high"),
-    (r"^\.next", "编译产物", "medium"),
-    (r"^dist/", "编译产物", "medium"),
-    (r"^build/", "编译产物", "medium"),
+    (r"^min\.(js|css)$", "编译产物", "high", "file"),
+    (r"^(bundle|chunk)\..*\.(js|css)$", "编译产物", "high", "file"),
+    (r"^dist/", "编译产物", "medium", "path"),
+    (r"^build/", "编译产物", "medium", "path"),
+    (r"\.next", "编译产物", "medium", "path"),
     # 二进制/媒体
-    (r"^(png|jpg|jpeg|gif|ico|svg|webp)$", "媒体文件", "medium"),
-    (r"^(woff2?|eot|ttf|otf)$", "字体文件", "medium"),
-    (r"^(pdf|zip|tar|gz|7z|rar)$", "二进制归档", "medium"),
+    (r"^(png|jpg|jpeg|gif|ico|svg|webp)$", "媒体文件", "medium", "ext"),
+    (r"^(woff2?|eot|ttf|otf)$", "字体文件", "medium", "ext"),
+    (r"^(pdf|zip|tar|gz|7z|rar)$", "二进制归档", "medium", "ext"),
     # 生成文件
-    (r"^\.min\.", "minified", "high"),
-    (r"\.generated\.", "生成文件", "medium"),
-    (r"^terraform\.tfstate", "生成文件", "medium"),
-    (r"__pycache__", "缓存文件", "medium"),
-    (r"\.pyc$", "缓存文件", "low"),
-    (r"\.class$", "编译产物", "medium"),
+    (r"^\.min\.", "minified", "high", "file"),
+    (r"\.generated\.", "生成文件", "medium", "path"),
+    (r"^terraform\.tfstate", "生成文件", "medium", "file"),
+    (r"__pycache__", "缓存目录", "medium", "path"),
+    (r"\.pyc$", "缓存文件", "low", "ext"),
+    (r"\.class$", "编译产物", "medium", "ext"),
 ]
 
 
@@ -40,21 +40,25 @@ def _calc_waste_estimate(tl: SessionTimeline, count: int, severity: str) -> floa
     """估算浪费成本"""
     if count == 0:
         return 0.0
-    # 假设每次读文件平均消耗 ~5000 cached tokens 的上下文
-    avg_cost_per_read = 0.001  # ~$0.001 per read for context
-    if severity == "high":
-        avg_cost_per_read = 0.003
+    avg_cost_per_read = 0.003 if severity == "high" else 0.001
     return round(count * avg_cost_per_read, 4)
 
 
-def _match_toxic(file_ext: str | None) -> tuple[str, str] | None:
-    """匹配毒药模式，返回 (category, severity) 或 None"""
-    if not file_ext:
-        return None
-    ext_lower = file_ext.strip().lower()
-    for pattern, category, severity in TOXIC_PATTERNS:
-        if re.match(pattern, ext_lower):
-            return category, severity
+def _match_toxic(file_ext: str | None, file_name_hint: str | None = None) -> tuple[str, str] | None:
+    """匹配毒药模式。优先用 file_name_hint，fallback 到 file_ext"""
+    candidates = []
+
+    if file_name_hint:
+        candidates.append(("file", file_name_hint.strip().lower()))
+    if file_ext:
+        ext_lower = file_ext.strip().lower()
+        candidates.append(("ext", ext_lower))
+
+    for match_type, value in candidates:
+        for pattern, category, severity, match_style in TOXIC_PATTERNS:
+            if match_style == match_type or (match_style == "path" and match_type in ("file", "ext")):
+                if re.match(pattern, value):
+                    return category, severity
     return None
 
 
@@ -64,14 +68,13 @@ class ToxicFileSniffer(Sniffer):
 
     def sniff(self, timeline: SessionTimeline) -> list[WasteFinding]:
         findings: list[WasteFinding] = []
-        # 按扩展名分组统计
         ext_counts: dict[str, list[ToolUseSuccessEvent]] = {}
         ext_first_match: dict[str, tuple[str, str]] = {}
 
         for tc in timeline.tool_calls:
             if tc.tool_name not in ("Read", "Edit"):
                 continue
-            match = _match_toxic(tc.file_extension)
+            match = _match_toxic(tc.file_extension, tc.file_name)
             if match:
                 category, severity = match
                 key = tc.file_extension or ""
@@ -93,6 +96,7 @@ class ToxicFileSniffer(Sniffer):
                     "file_extension": ext,
                     "category": category,
                     "read_count": count,
+                    "fix_suggestion": f"在 CLAUDE.md 中提示不要读取 *.{ext} 文件，或在 .contextignore 中排除。",
                     "tool_calls": [
                         {"tool": e.tool_name, "size": e.tool_result_size_bytes}
                         for e in events[:5]

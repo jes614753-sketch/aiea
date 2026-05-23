@@ -26,7 +26,7 @@ class ApiSuccessEvent:
 
 @dataclass
 class ToolUseSuccessEvent:
-    """tengu_tool_use_success 解码后的数据"""
+    """工具调用事件（来自 telemetry 或 session JSONL）"""
     tool_name: str
     duration_ms: int
     tool_result_size_bytes: int
@@ -34,12 +34,15 @@ class ToolUseSuccessEvent:
     bash_command_len: Optional[int] = None
     file_extension: Optional[str] = None
     file_path_len: Optional[int] = None
+    file_name: Optional[str] = None
     heap_used_delta_bytes: Optional[int] = None
     external_delta_bytes: Optional[int] = None
     query_chain_id: Optional[str] = None
     query_depth: int = 0
     session_id: str = ""
     timestamp: str = ""
+    tool_status: str = "unknown"  # success / failed / timeout / unknown
+    exit_code: Optional[int] = None
 
 
 @dataclass
@@ -74,6 +77,20 @@ class WasteFinding:
 
 
 @dataclass
+class BashTimeoutEvent:
+    """tengu_bash_command_timeout_backgrounded 解码后"""
+    session_id: str = ""
+    timestamp: str = ""
+
+
+@dataclass
+class BroadBashDetectedEvent:
+    """tengu_ant_overly_broad_bash_detected 解码后"""
+    session_id: str = ""
+    timestamp: str = ""
+
+
+@dataclass
 class SessionTimeline:
     """单个 Session 的完整时间线"""
     session_id: str
@@ -82,6 +99,8 @@ class SessionTimeline:
     tool_calls: list[ToolUseSuccessEvent] = field(default_factory=list)
     context_sizes: list[ContextSizeEvent] = field(default_factory=list)
     rereads: list[FileReadRereadEvent] = field(default_factory=list)
+    bash_timeouts: list[BashTimeoutEvent] = field(default_factory=list)
+    broad_bash_detections: list[BroadBashDetectedEvent] = field(default_factory=list)
 
     @property
     def total_cost_usd(self) -> float:

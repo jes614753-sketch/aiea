@@ -74,7 +74,7 @@ def generate_markdown(
     lines.append(f"### 数据源")
     lines.append(f"")
     lines.append(f"```")
-    lines.append(f"~/.claude/telemetry/1p_failed_events.*.json")
+    lines.append(f"~/.claude/projects/**/*.jsonl (Session JSONL)")
     lines.append(f"```")
     lines.append(f"")
     lines.append(f"### 嗅探器版本")

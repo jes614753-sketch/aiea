@@ -52,6 +52,8 @@ def print_waste_finding(f: WasteFinding, index: int) -> None:
     if details.get("total_waste_bytes"):
         waste_kb = details["total_waste_bytes"] / 1024
         print(f"    {DIM}总输出: {waste_kb:.1f} KB{RESET}")
+    if details.get("fix_suggestion"):
+        print(f"    {GREEN}  修复建议: {details['fix_suggestion']}{RESET}")
 
 
 def print_timeline_summary(tl: SessionTimeline) -> None:
@@ -90,6 +92,27 @@ def print_report(
     print(f"  Session 数:      {len(timelines)}")
     print(f"  总成本:          ${total_cost:.4f}")
     print(f"  检测出浪费模式:  {total_findings} 条")
+
+    # Per-tool 归因
+    tool_stats: dict[str, dict] = {}
+    for tl in timelines:
+        for tc in tl.tool_calls:
+            name = tc.tool_name
+            if name not in tool_stats:
+                tool_stats[name] = {"count": 0, "failed": 0, "total_result_bytes": 0}
+            tool_stats[name]["count"] += 1
+            if tc.tool_status == "failed":
+                tool_stats[name]["failed"] += 1
+            tool_stats[name]["total_result_bytes"] += tc.tool_result_size_bytes
+
+    if tool_stats:
+        print(f"\n  🔧 工具归因 Top 10")
+        print(f"  {'─' * 50}")
+        print(f"  {'工具':<16} {'调用':>6} {'失败':>6} {'输出总量':>10}")
+        for name, stats in sorted(tool_stats.items(), key=lambda x: -x[1]["count"])[:10]:
+            kb = stats["total_result_bytes"] / 1024
+            failed_str = f" ({stats['failed']} fail)" if stats["failed"] > 0 else ""
+            print(f"  {name:<16} {stats['count']:>6} {failed_str:>6} {kb:>8.1f} KB")
 
     # 按 session 输出
     for tl in timelines:

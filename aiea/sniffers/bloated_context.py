@@ -23,7 +23,7 @@ class BloatedContextSniffer(Sniffer):
         oversized: list[ToolUseSuccessEvent] = []
 
         for tc in timeline.tool_calls:
-            if tc.tool_name == "Bash" and tc.tool_result_size_bytes > THRESHOLDS["warn"]:
+            if tc.tool_name in ("Bash", "PowerShell") and tc.tool_result_size_bytes > THRESHOLDS["warn"]:
                 oversized.append(tc)
 
         if not oversized:
@@ -59,6 +59,7 @@ class BloatedContextSniffer(Sniffer):
                 ),
                 estimated_waste_usd=waste_usd,
                 details={
+                    "fix_suggestion": "用 grep/ripgrep 替代全量 cat/head；对大文件使用 Read offset/limit 分页读取；添加 | head -N 管道截断输出。",
                     "total_oversized_calls": len(oversized),
                     "high_count": high_count,
                     "critical_count": critical_count,
