@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiea"
+version = "0.1.0"
+description = "AI Efficiency Auditor for Claude Code — token waste diagnosis"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+
+[project.scripts]
+aiea = "aiea.__main__:main"
