@@ -11,6 +11,7 @@ from . import register, Sniffer
 TOXIC_PATTERNS = [
     # lockfile (扩展名匹配)
     (r"^(lock|lockb)$", "lockfile", "high", "ext"),
+    (r"^package-lock\.json$", "lockfile", "high", "file"),
     (r"^yarn\.lock$", "lockfile", "high", "file"),
     (r"^pnpm-lock\.yaml$", "lockfile", "high", "file"),
     (r"^composer\.lock$", "lockfile", "high", "file"),
@@ -19,9 +20,9 @@ TOXIC_PATTERNS = [
     # 编译产物
     (r"^min\.(js|css)$", "编译产物", "high", "file"),
     (r"^(bundle|chunk)\..*\.(js|css)$", "编译产物", "high", "file"),
-    (r"^dist/", "编译产物", "medium", "path"),
-    (r"^build/", "编译产物", "medium", "path"),
-    (r"\.next", "编译产物", "medium", "path"),
+    (r"(^|/)dist/", "编译产物", "medium", "path"),
+    (r"(^|/)build/", "编译产物", "medium", "path"),
+    (r"(^|/)\.next/", "编译产物", "medium", "path"),
     # 二进制/媒体
     (r"^(png|jpg|jpeg|gif|ico|svg|webp)$", "媒体文件", "medium", "ext"),
     (r"^(woff2?|eot|ttf|otf)$", "字体文件", "medium", "ext"),
@@ -31,8 +32,8 @@ TOXIC_PATTERNS = [
     (r"\.generated\.", "生成文件", "medium", "path"),
     (r"^terraform\.tfstate", "生成文件", "medium", "file"),
     (r"__pycache__", "缓存目录", "medium", "path"),
-    (r"\.pyc$", "缓存文件", "low", "ext"),
-    (r"\.class$", "编译产物", "medium", "ext"),
+    (r"^pyc$", "缓存文件", "low", "ext"),
+    (r"^class$", "编译产物", "medium", "ext"),
 ]
 
 
@@ -44,20 +45,30 @@ def _calc_waste_estimate(tl: SessionTimeline, count: int, severity: str) -> floa
     return round(count * avg_cost_per_read, 4)
 
 
-def _match_toxic(file_ext: str | None, file_name_hint: str | None = None) -> tuple[str, str] | None:
-    """匹配毒药模式。优先用 file_name_hint，fallback 到 file_ext"""
+def _normalize_path(value: str) -> str:
+    return value.strip().replace("\\", "/").lower()
+
+
+def _match_toxic(
+    file_ext: str | None,
+    file_name_hint: str | None = None,
+    file_path: str | None = None,
+) -> tuple[str, str] | None:
+    """匹配毒药模式。优先用完整路径，再 fallback 到文件名和扩展名。"""
     candidates = []
 
+    if file_path:
+        candidates.append(("path", _normalize_path(file_path)))
     if file_name_hint:
-        candidates.append(("file", file_name_hint.strip().lower()))
+        candidates.append(("file", _normalize_path(file_name_hint)))
     if file_ext:
         ext_lower = file_ext.strip().lower()
         candidates.append(("ext", ext_lower))
 
     for match_type, value in candidates:
         for pattern, category, severity, match_style in TOXIC_PATTERNS:
-            if match_style == match_type or (match_style == "path" and match_type in ("file", "ext")):
-                if re.match(pattern, value):
+            if match_style == match_type:
+                if re.search(pattern, value):
                     return category, severity
     return None
 
@@ -74,31 +85,36 @@ class ToxicFileSniffer(Sniffer):
         for tc in timeline.tool_calls:
             if tc.tool_name not in ("Read", "Edit"):
                 continue
-            match = _match_toxic(tc.file_extension, tc.file_name)
+            match = _match_toxic(tc.file_extension, tc.file_name, tc.file_path)
             if match:
                 category, severity = match
-                key = tc.file_extension or ""
+                key = tc.file_path or tc.file_name or tc.file_extension or ""
                 if key not in ext_counts:
                     ext_counts[key] = []
                     ext_first_match[key] = (category, severity)
                 ext_counts[key].append(tc)
 
-        for ext, events in ext_counts.items():
-            category, severity = ext_first_match[ext]
+        for target, events in ext_counts.items():
+            category, severity = ext_first_match[target]
             count = len(events)
             waste = _calc_waste_estimate(timeline, count, severity)
             findings.append(WasteFinding(
                 severity=severity,
                 category=f"toxic_file_{category}",
-                message=f"毒药文件 .{ext} 被读入上下文 {count} 次 ({category})",
+                message=f"毒药文件 {target} 被读入上下文 {count} 次 ({category})",
                 estimated_waste_usd=waste,
                 details={
-                    "file_extension": ext,
+                    "file_extension": events[0].file_extension,
+                    "file_path": target,
                     "category": category,
                     "read_count": count,
-                    "fix_suggestion": f"在 CLAUDE.md 中提示不要读取 *.{ext} 文件，或在 .contextignore 中排除。",
+                    "fix_suggestion": f"在 CLAUDE.md 中提示不要读取 {target}，或在 .contextignore 中排除对应目录/文件。",
                     "tool_calls": [
-                        {"tool": e.tool_name, "size": e.tool_result_size_bytes}
+                        {
+                            "tool": e.tool_name,
+                            "size": e.tool_result_size_bytes,
+                            "path": e.file_path,
+                        }
                         for e in events[:5]
                     ],
                 },

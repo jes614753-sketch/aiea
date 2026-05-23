@@ -46,3 +46,7 @@ def run_all(timeline: SessionTimeline) -> list[WasteFinding]:
                 message=f"嗅探器 {name} 执行异常: {e}",
             ))
     return findings
+
+
+# Import built-in sniffers so their @register decorators populate the registry.
+from . import bloated_context, death_loop, toxic_file  # noqa: E402,F401

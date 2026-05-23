@@ -6,7 +6,6 @@
 
 import json
 import re
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -39,26 +38,46 @@ POISON_PATTERNS = [
     (r"\.generated\.", "generated"),
 ]
 
+PATH_POISON_PATTERNS = [
+    (r"(^|/)dist/", "build_output", "dist/"),
+    (r"(^|/)build/", "build_output", "build/"),
+    (r"(^|/)node_modules/", "dependency", "node_modules/"),
+    (r"(^|/)vendor/", "dependency", "vendor/"),
+    (r"(^|/)coverage/", "generated", "coverage/"),
+    (r"(^|/)\.git/", "vcs", ".git/"),
+]
 
-def _classify_poison(file_name: str) -> str | None:
-    """判断文件名是否匹配毒药模式"""
-    name_lower = file_name.lower()
+
+def _normalize_path(value: str) -> str:
+    return value.replace("\\", "/").lower()
+
+
+def _classify_poison(path_or_name: str) -> str | None:
+    """判断文件路径或文件名是否匹配毒药模式"""
+    name_lower = _normalize_path(path_or_name)
     for pattern, category in POISON_PATTERNS:
         if re.search(pattern, name_lower):
             return category
-    # 路径片段匹配
-    path_patterns = [
-        (r"(^|/)dist/", "build_output"),
-        (r"(^|/)build/", "build_output"),
-        (r"(^|/)node_modules/", "dependency"),
-        (r"(^|/)vendor/", "dependency"),
-        (r"(^|/)coverage/", "generated"),
-        (r"(^|/)\.git/", "vcs"),
-    ]
-    for pattern, category in path_patterns:
+    for pattern, category, _suggestion in PATH_POISON_PATTERNS:
         if re.search(pattern, name_lower):
             return category
     return None
+
+
+def _suggest_ignore_pattern(path_or_name: str, category: str | None) -> str:
+    """为 .contextignore 生成尽量不误伤的候选模式。"""
+    normalized = _normalize_path(path_or_name)
+    for pattern, _category, suggestion in PATH_POISON_PATTERNS:
+        if re.search(pattern, normalized):
+            return suggestion
+    return Path(path_or_name).name if "/" in normalized else path_or_name
+
+
+def _display_command(command: str | None, fallback: str) -> str:
+    if not command:
+        return fallback
+    compact = " ".join(command.split())
+    return compact if len(compact) <= 120 else compact[:117] + "..."
 
 
 # ─── 聚合分析 ───────────────────────────────────────────
@@ -69,17 +88,21 @@ def analyze_file_reads(timelines: list[SessionTimeline], min_sessions: int) -> l
 
     for tl in timelines:
         for tc in tl.tool_calls:
-            if tc.tool_name != "Read" or not tc.file_name:
+            if tc.tool_name != "Read" or not (tc.file_path or tc.file_name):
                 continue
-            key = tc.file_name
+            key = tc.file_path or tc.file_name
+            display_name = tc.file_name or key
+            category = _classify_poison(key)
             if key not in stats:
                 stats[key] = {
-                    "file_name": key,
+                    "file_name": display_name,
+                    "file_path": tc.file_path,
                     "read_count": 0,
                     "sessions": set(),
                     "total_bytes": 0,
                     "failed_count": 0,
-                    "poison_category": _classify_poison(key),
+                    "poison_category": category,
+                    "suggested_pattern": _suggest_ignore_pattern(key, category),
                 }
             s = stats[key]
             s["read_count"] += 1
@@ -97,13 +120,14 @@ def analyze_file_reads(timelines: list[SessionTimeline], min_sessions: int) -> l
             continue
         results.append({
             "file_name": s["file_name"],
+            "file_path": s.get("file_path"),
             "read_count": s["read_count"],
             "session_count": len(s["sessions"]),
             "total_bytes": s["total_bytes"],
             "failed_count": s["failed_count"],
             "poison_category": s["poison_category"],
             "confidence": "high" if s["poison_category"] else "medium",
-            "suggested_pattern": s["file_name"],
+            "suggested_pattern": s["suggested_pattern"],
         })
 
     return sorted(results, key=lambda x: -x["total_bytes"])
@@ -119,14 +143,15 @@ def analyze_bloated_commands(timelines: list[SessionTimeline]) -> list[dict]:
                 continue
             if tc.tool_result_size_bytes < LARGE_OUTPUT_THRESHOLD:
                 continue
-            # 按 bash_command_len 分桶（无完整命令文本时的近似）
-            if tc.bash_command_len:
+            if tc.bash_command_text:
+                bucket = _display_command(tc.bash_command_text, "unknown_cmd")
+            elif tc.bash_command_len:
                 bucket = f"cmd_len_{tc.bash_command_len // 10 * 10}-{tc.bash_command_len // 10 * 10 + 9}"
             else:
                 bucket = "unknown_cmd"
             if bucket not in stats:
                 stats[bucket] = {
-                    "command_bucket": bucket,
+                    "command": bucket,
                     "count": 0,
                     "sessions": set(),
                     "total_bytes": 0,
@@ -143,7 +168,8 @@ def analyze_bloated_commands(timelines: list[SessionTimeline]) -> list[dict]:
         if len(s["sessions"]) < 2:
             continue
         results.append({
-            "command_bucket": s["command_bucket"],
+            "command": s["command"],
+            "command_bucket": s["command"],
             "call_count": s["count"],
             "session_count": len(s["sessions"]),
             "total_bytes": s["total_bytes"],
@@ -194,16 +220,20 @@ def analyze_poison_files(timelines: list[SessionTimeline], min_sessions: int) ->
 
     for tl in timelines:
         for tc in tl.tool_calls:
-            if tc.tool_name != "Read" or not tc.file_name:
+            if tc.tool_name != "Read" or not (tc.file_path or tc.file_name):
                 continue
-            category = _classify_poison(tc.file_name)
+            key_path = tc.file_path or tc.file_name
+            category = _classify_poison(key_path)
             if not category:
                 continue
-            key = (tc.file_name, category)
+            suggested_pattern = _suggest_ignore_pattern(key_path, category)
+            key = (suggested_pattern, category)
             if key not in stats:
                 stats[key] = {
                     "file_name": tc.file_name,
+                    "file_path": tc.file_path,
                     "category": category,
+                    "suggested_pattern": suggested_pattern,
                     "count": 0,
                     "sessions": set(),
                     "total_bytes": 0,
@@ -219,12 +249,13 @@ def analyze_poison_files(timelines: list[SessionTimeline], min_sessions: int) ->
             continue
         results.append({
             "file_name": s["file_name"],
+            "file_path": s.get("file_path"),
             "poison_category": s["category"],
             "read_count": s["count"],
             "session_count": len(s["sessions"]),
             "total_bytes": s["total_bytes"],
             "confidence": "high",
-            "suggested_pattern": s["file_name"],
+            "suggested_pattern": s["suggested_pattern"],
         })
 
     return sorted(results, key=lambda x: -x["total_bytes"])
@@ -411,7 +442,7 @@ def print_learning_summary(report: dict) -> None:
     if report["bloated_commands"]:
         print(f"\n  📦 大输出命令 Top 5")
         for c in report["bloated_commands"][:5]:
-            print(f"    {c['command_bucket']:<20} {c['call_count']:>4} 次 / {c['session_count']} session / {c['total_bytes']//1024:>6} KB (max {c['max_bytes']//1024} KB)")
+            print(f"    {c['command']:<40} {c['call_count']:>4} 次 / {c['session_count']} session / {c['total_bytes']//1024:>6} KB (max {c['max_bytes']//1024} KB)")
 
     # 失败率
     if report["high_failure_tools"]:

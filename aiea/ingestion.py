@@ -7,6 +7,7 @@
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 from .models import (
@@ -129,22 +130,48 @@ def _extract_input_size(content: list[dict] | None) -> int:
     return total
 
 
-def _extract_bash_cmd_len(content: list[dict] | None) -> int | None:
-    """提取 bash/PowerShell 命令长度"""
+def _parse_timestamp(value: str) -> datetime | None:
+    """解析 Claude Code JSONL 中的 ISO timestamp。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _estimate_duration_ms(start: str, end: str) -> int:
+    """用 tool_use 与 tool_result 的时间戳粗略估算工具耗时。"""
+    start_dt = _parse_timestamp(start)
+    end_dt = _parse_timestamp(end)
+    if not start_dt or not end_dt:
+        return 0
+    delta_ms = int((end_dt - start_dt).total_seconds() * 1000)
+    return max(delta_ms, 0)
+
+
+def _extract_bash_command(content: list[dict] | None) -> str | None:
+    """提取 bash/PowerShell 命令原文。"""
     if not content:
         return None
     for item in content:
         if item.get("type") == "tool_use" and item.get("name") in ("Bash", "PowerShell"):
             cmd = item.get("input", {}).get("command", "")
-            return len(cmd) if cmd else None
+            return cmd if cmd else None
     return None
 
 
-def _extract_file_info(content: list[dict] | None) -> tuple[int | None, int | None, str | None]:
-    """提取文件相关工具的 (路径长度, 扩展名, 文件名)"""
+def _extract_bash_cmd_len(content: list[dict] | None) -> int | None:
+    """提取 bash/PowerShell 命令长度"""
+    cmd = _extract_bash_command(content)
+    return len(cmd) if cmd else None
+
+
+def _extract_file_info(content: list[dict] | None) -> tuple[int | None, int | None, str | None, str | None]:
+    """提取文件相关工具的 (路径长度, 扩展名, 文件名, 完整路径)"""
     if not content:
-        return None, None, None
-    file_tools = {"Read", "Edit", "Write", "NotebookEdit"}
+        return None, None, None, None
+    file_tools = {"Read", "Edit", "Write", "MultiEdit", "NotebookEdit"}
     for item in content:
         if item.get("type") == "tool_use" and item.get("name") in file_tools:
             inp = item.get("input", {})
@@ -152,8 +179,8 @@ def _extract_file_info(content: list[dict] | None) -> tuple[int | None, int | No
             if fp:
                 ext = Path(fp).suffix.lstrip(".").lower() or None
                 name = Path(fp).name
-                return len(fp), ext, name
-    return None, None, None
+                return len(fp), ext, name, fp
+    return None, None, None, None
 
 
 # ─── Session JSONL 解析 ─────────────────────────────────
@@ -287,18 +314,26 @@ def _extract_tool_calls_from_session(jsonl_path: Path) -> list[ToolUseSuccessEve
         if tool_name in ("Bash", "PowerShell"):
             status = _infer_bash_status(result_content, use_info)
 
-        bash_cmd_len = _extract_bash_cmd_len(use_info["content"])
-        file_path_len, file_ext, file_name = _extract_file_info(use_info["content"])
+        bash_command = _extract_bash_command(use_info["content"])
+        bash_cmd_len = len(bash_command) if bash_command else None
+        file_path_len, file_ext, file_name, file_path = _extract_file_info(use_info["content"])
+        result_timestamp = result.get("timestamp", "")
+        duration_ms = _estimate_duration_ms(use_info.get("timestamp", ""), result_timestamp)
 
         tool_calls.append(ToolUseSuccessEvent(
             tool_name=tool_name,
-            duration_ms=0,
+            duration_ms=duration_ms,
             tool_result_size_bytes=_extract_result_size(result_content),
             tool_input_size_bytes=_extract_input_size(use_info["content"]),
+            tool_use_id=tool_id,
             bash_command_len=bash_cmd_len,
+            bash_command_text=bash_command,
             file_extension=file_ext,
             file_path_len=file_path_len,
+            file_path=file_path,
             file_name=file_name,
+            result_timestamp=result_timestamp,
+            duration_ms_estimated=bool(duration_ms),
             session_id=session_id,
             timestamp=use_info.get("timestamp", ""),
             tool_status=status,

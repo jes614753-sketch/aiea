@@ -31,10 +31,15 @@ class ToolUseSuccessEvent:
     duration_ms: int
     tool_result_size_bytes: int
     tool_input_size_bytes: int
+    tool_use_id: Optional[str] = None
     bash_command_len: Optional[int] = None
+    bash_command_text: Optional[str] = None
     file_extension: Optional[str] = None
     file_path_len: Optional[int] = None
+    file_path: Optional[str] = None
     file_name: Optional[str] = None
+    result_timestamp: str = ""
+    duration_ms_estimated: bool = False
     heap_used_delta_bytes: Optional[int] = None
     external_delta_bytes: Optional[int] = None
     query_chain_id: Optional[str] = None

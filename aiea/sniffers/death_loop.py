@@ -8,6 +8,25 @@ from . import register, Sniffer
 DEATH_LOOP_MIN_COUNT = 3
 # 命令长度相似度阈值（差异 <30% 视为同一条）
 CMD_LEN_RATIO = 0.3
+FAILURE_STATUSES = {"failed", "timeout"}
+
+
+def _commands_similar(prev: ToolUseSuccessEvent, curr: ToolUseSuccessEvent) -> bool:
+    """判断两次命令是否足够相似。优先用命令原文，退化到长度。"""
+    prev_cmd = (prev.bash_command_text or "").strip()
+    curr_cmd = (curr.bash_command_text or "").strip()
+    if prev_cmd and curr_cmd:
+        if prev_cmd == curr_cmd:
+            return True
+        return False
+
+    if prev.bash_command_len and curr.bash_command_len:
+        diff_ratio = (
+            abs(prev.bash_command_len - curr.bash_command_len)
+            / max(prev.bash_command_len, 1)
+        )
+        return diff_ratio < CMD_LEN_RATIO
+    return False
 
 
 @register("death_loop")
@@ -20,6 +39,7 @@ class DeathLoopSniffer(Sniffer):
         bash_calls = [
             tc for tc in timeline.tool_calls
             if tc.tool_name in ("Bash", "PowerShell")
+            and tc.tool_status in FAILURE_STATUSES
         ]
 
         if len(bash_calls) < DEATH_LOOP_MIN_COUNT:
@@ -33,16 +53,7 @@ class DeathLoopSniffer(Sniffer):
             prev = bash_calls[i - 1]
             curr = bash_calls[i]
 
-            # 命令长度差异 < 30% 视为相似
-            cmd_similar = False
-            if prev.bash_command_len and curr.bash_command_len:
-                diff_ratio = (
-                    abs(prev.bash_command_len - curr.bash_command_len)
-                    / max(prev.bash_command_len, 1)
-                )
-                cmd_similar = diff_ratio < CMD_LEN_RATIO
-
-            if cmd_similar:
+            if _commands_similar(prev, curr):
                 current_group.append(curr)
             else:
                 if len(current_group) >= DEATH_LOOP_MIN_COUNT:
@@ -59,7 +70,10 @@ class DeathLoopSniffer(Sniffer):
 
             # 有 bash_timeout 事件佐证则严重等级提高
             has_timeout_evidence = bool(timeline.bash_timeouts)
+            has_tool_timeout = any(tc.tool_status == "timeout" for tc in group)
+            has_timeout_evidence = has_timeout_evidence or has_tool_timeout
             severity = "high" if (count >= 5 or has_timeout_evidence) else "medium"
+            command = group[0].bash_command_text
 
             # 估算浪费
             waste_usd = 0.0
@@ -79,6 +93,7 @@ class DeathLoopSniffer(Sniffer):
                 details={
                     "fix_suggestion": "检查命令失败原因再重试；使用 pipe 或 tee 捕获中间结果；避免在循环中反复调用相同 Bash 命令。",
                     "retry_count": count,
+                    "command": command,
                     "total_output_bytes": total_result_size,
                     "wasted_api_calls": min(count, len(timeline.api_calls)),
                     "cmd_len_range": (
